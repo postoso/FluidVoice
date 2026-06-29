@@ -4670,7 +4670,22 @@ extension SettingsStore {
         set {
             objectWillChange.send()
             let model = newValue == .nemotronStreaming320 ? SpeechModel.nemotronStreaming : newValue
+            let oldRawValue = self.defaults.string(forKey: Keys.selectedSpeechModel)
             self.defaults.set(model.rawValue, forKey: Keys.selectedSpeechModel)
+
+            // Diagnostic logging for the silent "model resets after an update" reports (issue #467).
+            // This setter was previously unlogged, so the offending write left no trace and the writer
+            // could not be identified retroactively. Log only when the value actually changes to keep
+            // noise low; include the app version and the caller stack so the next occurrence names the writer.
+            if oldRawValue != model.rawValue {
+                let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+                DebugLogger.shared.info(
+                    "selectedSpeechModel changed: \(oldRawValue ?? "nil") -> \(model.rawValue) (app \(appVersion))",
+                    source: "SettingsStore"
+                )
+                let callStack = Thread.callStackSymbols.prefix(12).joined(separator: " | ")
+                DebugLogger.shared.debug("selectedSpeechModel writer call stack: \(callStack)", source: "SettingsStore")
+            }
         }
     }
 
@@ -4758,7 +4773,9 @@ extension SettingsStore {
 
         // Persist the migrated value
         self.defaults.set(newModel.rawValue, forKey: Keys.selectedSpeechModel)
-        DebugLogger.shared.info("Migrated speech model settings: \(oldProvider)/\(oldWhisperSize) -> \(newModel.rawValue)", source: "SettingsStore")
+        // Stamp the app version so a migration-driven write can be correlated with the update that triggered it (issue #467).
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        DebugLogger.shared.info("Migrated speech model settings: \(oldProvider)/\(oldWhisperSize) -> \(newModel.rawValue) (app \(appVersion))", source: "SettingsStore")
 
         return newModel
     }
