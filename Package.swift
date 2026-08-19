@@ -13,7 +13,7 @@ let package = Package(
         .package(url: "https://github.com/altic-dev/FluidAudio.git", branch: "B/cohere-coreml-asr"),
         .package(url: "https://github.com/mxcl/PromiseKit", from: "6.0.0"),
         .package(url: "https://github.com/altic-dev/DynamicNotchKit.git", branch: "main"),
-        .package(url: "https://github.com/altic-dev/transcribe-cpp-swift.git", exact: "0.1.2"),
+        .package(url: "https://github.com/altic-dev/transcribe-cpp-swift.git", exact: "0.2.0"),
     ],
     targets: [
         .target(

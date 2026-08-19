@@ -684,7 +684,7 @@
 			repositoryURL = "https://github.com/altic-dev/transcribe-cpp-swift.git";
 			requirement = {
 				kind = exactVersion;
-				version = 0.1.2;
+				version = 0.2.0;
 			};
 		};
 		7CE006BB2E80EBE600DDCCD6 /* XCRemoteSwiftPackageReference "AppUpdater" */ = {
