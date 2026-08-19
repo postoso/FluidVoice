@@ -152,9 +152,12 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :ApplicationProperties:ApplicationPath Applications/$APP_NAME.app" "$ARCHIVE_INFO_PLIST"
           /usr/libexec/PlistBuddy -c "Set :ApplicationProperties:CFBundleIdentifier $BUNDLE_IDENTIFIER" "$ARCHIVE_INFO_PLIST"
 
-          # Xcode's XCFramework copy flattens CTranscribe's version symlinks.
-          # Restore the canonical framework layout before replacing its stale
-          # upstream signature.
+          # The published transcribe.cpp XCFramework asset is already flat: its
+          # zip contains no symlink entries, so Versions/Current arrives as a
+          # real directory and the CTranscribe binary is stored three times.
+          # Xcode copies that faithfully, so the layout has to be rebuilt here
+          # before replacing the stale upstream signature. transcribe.cpp#133
+          # fixes the packaging upstream but is not in any release tag yet.
           CTRANSCRIBE_FRAMEWORK="$APP_PATH/Contents/Frameworks/CTranscribe.framework"
           test -d "$CTRANSCRIBE_FRAMEWORK/Versions/A"
           rm -rf \
