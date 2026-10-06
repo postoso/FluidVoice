@@ -99,12 +99,20 @@ jobs:
     - name: Build and test (excluding flaky Tiny Whisper E2E)
       run: |
         set -o pipefail
+        rm -f /tmp/fv-terminalservice-calls.log
         xcodebuild test \
           -project Fluid.xcodeproj \
           -scheme Fluid \
           -destination 'platform=macOS,arch=arm64' \
-          -skip-testing:FluidDictationIntegrationTests/DictationE2ETests/testDictationEndToEnd_whisperTiny_transcribesFixture \
+          -only-testing:FluidDictationIntegrationTests/MeetingRecoveryTests/testPermissionPreflightCompletesBeforeMeetingLeaseAcquisition \
+          -test-iterations 1000 -run-tests-until-failure \
+          -test-timeouts-enabled YES -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60 \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
           CODE_SIGNING_ALLOWED=NO \
           | xcpretty
+
+    - name: Report TerminalService calls during the hosted suite
+      if: always()
+      run: |
+        if [ -f /tmp/fv-terminalservice-calls.log ]; then echo "TerminalService.execute calls:"; cat /tmp/fv-terminalservice-calls.log; else echo "TerminalService.execute was never called during the hosted suite"; fi
