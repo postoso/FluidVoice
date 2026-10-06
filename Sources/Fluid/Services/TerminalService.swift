@@ -70,6 +70,15 @@ final class TerminalService {
         timeout: TimeInterval = 30
     ) async -> CommandResult {
         let startTime = Date()
+        // EXPERIMENT ONLY (fork CI): record every call so CI can show whether the hosted suite runs commands.
+        let marker = URL(fileURLWithPath: "/tmp/fv-terminalservice-calls.log")
+        if let handle = try? FileHandle(forWritingTo: marker) {
+            handle.seekToEndOfFile()
+            handle.write(Data((command + "\n").utf8))
+            try? handle.close()
+        } else {
+            try? Data((command + "\n").utf8).write(to: marker)
+        }
 
         let process = Process()
         let outputPipe = Pipe()
