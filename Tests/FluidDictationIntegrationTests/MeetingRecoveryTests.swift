@@ -4125,7 +4125,7 @@ final class MeetingRecoveryTests: XCTestCase {
         )
 
         let start = Task { try await coordinator.startRecording(configuration: self.makeConfiguration()) }
-        while capture.preflightCount == 0 {
+        while continuation == nil {
             await Task.yield()
         }
         XCTAssertEqual(arbiter.acquireCount, 0, "permission prompt must not hold the meeting audio lease")
