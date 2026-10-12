@@ -26,7 +26,6 @@ final class TranscriptionHistoryDatabase {
             try self.execute("PRAGMA synchronous=FULL")
             try self.execute("PRAGMA secure_delete=ON")
             try self.execute("CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, payload BLOB NOT NULL)")
-            try self.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY)")
         } catch {
             sqlite3_close(handle)
             throw error
@@ -35,23 +34,12 @@ final class TranscriptionHistoryDatabase {
 
     deinit { sqlite3_close(self.connection) }
 
-    var isMigrated: Bool {
-        get throws {
-            let statement = try self.prepare("SELECT 1 FROM metadata WHERE key='legacy_imported'")
-            defer { sqlite3_finalize(statement) }
-            let result = sqlite3_step(statement)
-            guard result == SQLITE_ROW || result == SQLITE_DONE else { throw self.error() }
-            return result == SQLITE_ROW
-        }
-    }
-
-    func migrate(_ records: [Record]) throws {
-        guard try !self.isMigrated else { return }
+    /// Adds legacy entries the database does not have yet. An existing row is newer, so it wins.
+    func importLegacy(_ records: [Record]) throws {
         try self.transaction {
             for record in records {
-                try self.upsert(record)
+                try self.upsert(record, replacing: false)
             }
-            try self.execute("INSERT INTO metadata(key) VALUES ('legacy_imported')")
         }
     }
 
@@ -84,8 +72,9 @@ final class TranscriptionHistoryDatabase {
         }
     }
 
-    private func upsert(_ record: Record) throws {
-        let statement = try self.prepare("INSERT OR REPLACE INTO history(id,payload) VALUES ('\(record.id.uuidString)',?)")
+    private func upsert(_ record: Record, replacing: Bool = true) throws {
+        let conflict = replacing ? "REPLACE" : "IGNORE"
+        let statement = try self.prepare("INSERT OR \(conflict) INTO history(id,payload) VALUES ('\(record.id.uuidString)',?)")
         defer { sqlite3_finalize(statement) }
         let result = record.payload.withUnsafeBytes { bytes in
             sqlite3_bind_blob(statement, 1, bytes.baseAddress, Int32(bytes.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
@@ -123,7 +112,7 @@ final class TranscriptionHistoryDatabase {
     }
 }
 
-/// All disk queries and Codable work happen here, including the one-time legacy import.
+/// All disk queries and Codable work happen here, including the legacy import.
 final class TranscriptionHistoryWriter: @unchecked Sendable {
     private let queue = DispatchQueue(label: "fluid.history.persistence", qos: .utility)
     private var database: TranscriptionHistoryDatabase?
@@ -144,11 +133,11 @@ final class TranscriptionHistoryWriter: @unchecked Sendable {
                 do {
                     let database = try self.database ?? TranscriptionHistoryDatabase(url: self.url)
                     self.database = database
-                    if try !database.isMigrated {
-                        let legacy = try self.defaults.data(forKey: self.legacyKey).map {
-                            try JSONDecoder().decode([TranscriptionHistoryEntry].self, from: $0)
-                        } ?? []
-                        try database.migrate(legacy.map { try self.record($0) })
+                    // The database is shared by every build, while legacy history lives in each
+                    // bundle's defaults and older versions write it again after a downgrade.
+                    if let data = self.defaults.data(forKey: self.legacyKey) {
+                        let legacy = try JSONDecoder().decode([TranscriptionHistoryEntry].self, from: data)
+                        try database.importLegacy(legacy.map { try self.record($0) })
                     }
                     let entries = try database.read().map {
                         try JSONDecoder().decode(TranscriptionHistoryEntry.self, from: $0.payload)

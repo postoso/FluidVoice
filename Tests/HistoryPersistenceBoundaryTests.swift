@@ -145,10 +145,12 @@ final class DebugLogger {
         await store.finishPendingWrites()
         let afterClear = try await writer.load()
         precondition(afterClear.isEmpty, "Late audio must not resurrect deleted entries")
-        try defaults.set(JSONEncoder().encode(legacy), forKey: key)
+        // Imported legacy history is retired, so nothing is left to resurrect cleared history.
+        // Legacy history written later is new to the database and is imported (see testLegacyImportAcrossBuilds).
+        precondition(defaults.data(forKey: key) == nil)
         let afterRestart = try await TranscriptionHistoryWriter(defaults: defaults, url: url).load()
-        precondition(afterRestart.isEmpty, "Migration marker must prevent old history resurrection")
-        print("PASS: clear, late audio, restart and stale legacy cannot resurrect history")
+        precondition(afterRestart.isEmpty, "Cleared history must stay cleared after restart")
+        print("PASS: clear, late audio and restart cannot resurrect history")
 
         let badURL = root.appendingPathComponent("bad.sqlite3")
         let badData = Data("invalid JSON".utf8)
@@ -191,6 +193,70 @@ final class DebugLogger {
         print("PASS: restore during loading replaces both memory and disk")
         try await self.testTodaySummary(root: root, defaults: defaults, audio: audio)
         try await self.testStars(root: root, defaults: defaults, audio: audio)
+        try await self.testLegacyImportAcrossBuilds(root: root)
+    }
+
+    /// The database is shared by every build on the Mac, but each bundle and each older
+    /// version keeps legacy history in its own defaults. Neither may lose unimported entries.
+    static func testLegacyImportAcrossBuilds(root: URL) async throws {
+        let key = "TranscriptionHistoryEntries"
+        let suites = (0..<3).map { "fluid-history-legacy-\($0)-\(UUID())" }
+        defer { suites.forEach { UserDefaults().removePersistentDomain(forName: $0) } }
+        guard let debugDefaults = UserDefaults(suiteName: suites[0]),
+              let releaseDefaults = UserDefaults(suiteName: suites[1]),
+              let upgradeDefaults = UserDefaults(suiteName: suites[2])
+        else { preconditionFailure("Unable to create isolated history defaults") }
+        func entry(_ seconds: TimeInterval, _ text: String, starred: Bool = false) -> TranscriptionHistoryEntry {
+            TranscriptionHistoryEntry(
+                timestamp: Date(timeIntervalSince1970: seconds),
+                rawText: text,
+                processedText: text,
+                appName: "Test",
+                windowTitle: "Test",
+                wasAIProcessed: false,
+                isStarred: starred
+            )
+        }
+
+        // Another build created the database first and recorded its own (empty) import.
+        let sharedURL = root.appendingPathComponent("shared.sqlite3")
+        let debugLoad = try await TranscriptionHistoryWriter(defaults: debugDefaults, url: sharedURL).load()
+        precondition(debugLoad.isEmpty)
+        let release = [entry(2, "release two"), entry(1, "release one")]
+        try releaseDefaults.set(JSONEncoder().encode(release), forKey: key)
+        let releaseLoad = try await TranscriptionHistoryWriter(defaults: releaseDefaults, url: sharedURL).load()
+        precondition(releaseLoad == release, "History another build never imported must be imported, not deleted")
+        precondition(releaseDefaults.data(forKey: key) == nil, "Legacy history is retired once it is in the database")
+        print("PASS: legacy history is imported when another build created the database first")
+
+        // Upgrade, star an entry, run an older version that writes legacy history again, upgrade.
+        let upgradeURL = root.appendingPathComponent("upgrade.sqlite3")
+        let original = entry(1, "before downgrade")
+        try upgradeDefaults.set(JSONEncoder().encode([original]), forKey: key)
+        let upgradeWriter = TranscriptionHistoryWriter(defaults: upgradeDefaults, url: upgradeURL)
+        _ = try await upgradeWriter.load()
+        var starred = original
+        starred.isStarred = true
+        let starError = await withCheckedContinuation { continuation in
+            upgradeWriter.write(upserts: [starred]) { continuation.resume(returning: $0) }
+        }
+        precondition(starError == nil)
+        let downgraded = entry(2, "dictated after downgrade")
+        try upgradeDefaults.set(JSONEncoder().encode([downgraded, original]), forKey: key)
+        let reupgraded = try await TranscriptionHistoryWriter(defaults: upgradeDefaults, url: upgradeURL).load()
+        precondition(reupgraded == [downgraded, starred], "Re-upgrading must add new legacy entries and keep newer database rows")
+        precondition(upgradeDefaults.data(forKey: key) == nil)
+        print("PASS: entries written by an older version after upgrading are merged without overwriting database rows")
+
+        // Unreadable legacy data next to an imported database stays put and fails visibly.
+        let unreadable = Data("invalid JSON".utf8)
+        upgradeDefaults.set(unreadable, forKey: key)
+        do {
+            _ = try await TranscriptionHistoryWriter(defaults: upgradeDefaults, url: upgradeURL).load()
+            preconditionFailure("Unreadable legacy history must fail visibly")
+        } catch {}
+        precondition(upgradeDefaults.data(forKey: key) == unreadable, "Unreadable legacy history must never be deleted")
+        print("PASS: unreadable legacy history beside an imported database is preserved")
     }
 
     @MainActor static func testStars(root: URL, defaults: UserDefaults, audio: DictationAudioMetadata) async throws {
