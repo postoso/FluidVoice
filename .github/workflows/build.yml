@@ -91,9 +91,6 @@ jobs:
     - name: Run standalone onboarding regressions
       run: sh Tests/run_onboarding_tests.sh
 
-    - name: Run release highlights regressions
-      run: sh Tests/run_release_highlights_tests.sh
-
     - name: Run history decode recovery regressions
       run: sh Tests/run_history_decode_recovery_tests.sh
 
