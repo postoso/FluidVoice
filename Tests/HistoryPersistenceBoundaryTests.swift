@@ -14,10 +14,15 @@ struct DictationAudioMetadata: Codable, Equatable, Sendable {
 
 final class DictationAudioHistoryStore {
     static let shared = DictationAudioHistoryStore()
+    var usageBytes: Int64 = 0
+    var orphanSweeps = 0
     @discardableResult func deleteAudio(fileName: String) -> Int64 { 0 }
     func deleteAllAudioFiles() {}
-    func audioUsageBytes() -> Int64 { 0 }
-    func deleteUnreferencedAudioFiles(referencedFileNames: Set<String>) -> (fileCount: Int, byteCount: Int64) { (0, 0) }
+    func audioUsageBytes() -> Int64 { self.usageBytes }
+    func deleteUnreferencedAudioFiles(referencedFileNames: Set<String>) -> (fileCount: Int, byteCount: Int64) {
+        self.orphanSweeps += 1
+        return (0, 0)
+    }
 }
 
 @MainActor final class SettingsStore {
@@ -280,6 +285,18 @@ final class RewritingDefaults: UserDefaults {
         precondition(upgradeDefaults.data(forKey: key) == unreadable, "Unreadable legacy history must never be deleted")
         print("PASS: unreadable legacy history is preserved without blocking saved history or new dictations")
 
+        // Audio referenced only by unimported legacy history must not be swept as orphaned.
+        let audioStore = DictationAudioHistoryStore.shared
+        audioStore.usageBytes = 2_000_000
+        defer { audioStore.usageBytes = 0 }
+        let sweeps = audioStore.orphanSweeps
+        store.pruneAudioToBudget()
+        precondition(audioStore.orphanSweeps == sweeps, "Unreadable legacy history must block the orphaned audio sweep")
+        upgradeDefaults.removeObject(forKey: key)
+        store.pruneAudioToBudget()
+        precondition(audioStore.orphanSweeps == sweeps + 1, "Fully imported history must allow the orphaned audio sweep")
+        print("PASS: unimported legacy history blocks only the orphaned audio sweep")
+
         // An older instance saves a newer legacy array after this load read the key.
         let racingSuite = "fluid-history-legacy-race-\(UUID())"
         defer { UserDefaults().removePersistentDomain(forName: racingSuite) }
@@ -292,8 +309,12 @@ final class RewritingDefaults: UserDefaults {
         try racingDefaults.set(JSONEncoder().encode([first]), forKey: key)
         let rewritten = try JSONEncoder().encode([concurrent, first])
         racingDefaults.replacement = rewritten
-        let racedLoad = try await TranscriptionHistoryWriter(defaults: racingDefaults, url: racingURL).load()
-        precondition(racedLoad == [first])
+        let racedStore = TranscriptionHistoryStore(writer: TranscriptionHistoryWriter(defaults: racingDefaults, url: racingURL))
+        try await racedStore.waitUntilLoaded()
+        precondition(racedStore.entries == [first])
+        let racedSweeps = audioStore.orphanSweeps
+        racedStore.pruneAudioToBudget()
+        precondition(audioStore.orphanSweeps == racedSweeps, "Legacy history retained for the next load must block the orphaned audio sweep")
         precondition(racingDefaults.data(forKey: key) == rewritten, "Legacy history rewritten during a load must not be retired")
         let nextLoad = try await TranscriptionHistoryWriter(defaults: racingDefaults, url: racingURL).load()
         precondition(nextLoad == [concurrent, first], "The next load must import the rewritten legacy history")
@@ -316,6 +337,17 @@ final class RewritingDefaults: UserDefaults {
         precondition(markedLoad == unimported, "An old import marker must not skip legacy history")
         precondition(markedDefaults.data(forKey: key) == nil)
         print("PASS: legacy history is imported into a database carrying the old import marker")
+
+        // Only unreadable legacy bytes are skipped; a failed import still fails the load.
+        let source = try JSONEncoder().encode([entry(3, "import fails")])
+        markedDefaults.set(source, forKey: key)
+        try self.sql(markedURL, "CREATE TRIGGER reject_import BEFORE INSERT ON history BEGIN SELECT RAISE(FAIL, 'test disk failure'); END")
+        do {
+            _ = try await TranscriptionHistoryWriter(defaults: markedDefaults, url: markedURL).load()
+            preconditionFailure("A failed legacy import must fail the load")
+        } catch {}
+        precondition(markedDefaults.data(forKey: key) == source, "A failed legacy import must keep legacy history")
+        print("PASS: a failed legacy import fails the load and keeps legacy history")
     }
 
     @MainActor static func testStars(root: URL, defaults: UserDefaults, audio: DictationAudioMetadata) async throws {

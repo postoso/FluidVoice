@@ -34,11 +34,11 @@ final class TranscriptionHistoryDatabase {
 
     deinit { sqlite3_close(self.connection) }
 
-    /// Adds legacy entries the database does not have yet. An existing row is newer, so it wins.
+    /// Adds legacy entries the database does not have yet. For an id in both, the database copy wins.
     func importLegacy(_ records: [Record]) throws {
         try self.transaction {
             for record in records {
-                try self.upsert(record, replacing: false)
+                try self.upsert(record, overwriting: false)
             }
         }
     }
@@ -72,8 +72,8 @@ final class TranscriptionHistoryDatabase {
         }
     }
 
-    private func upsert(_ record: Record, replacing: Bool = true) throws {
-        let conflict = replacing ? "REPLACE" : "IGNORE"
+    private func upsert(_ record: Record, overwriting: Bool = true) throws {
+        let conflict = overwriting ? "REPLACE" : "IGNORE"
         let statement = try self.prepare("INSERT OR \(conflict) INTO history(id,payload) VALUES ('\(record.id.uuidString)',?)")
         defer { sqlite3_finalize(statement) }
         let result = record.payload.withUnsafeBytes { bytes in
@@ -127,6 +127,11 @@ final class TranscriptionHistoryWriter: @unchecked Sendable {
             .appendingPathComponent("Library/Application Support/FluidVoice/TranscriptionHistory.sqlite3")
     }
 
+    /// Legacy history left in defaults (unreadable, or rewritten during a load) is not in the loaded entries.
+    var hasUnimportedLegacyHistory: Bool {
+        self.defaults.data(forKey: self.legacyKey) != nil
+    }
+
     func load() async throws -> [TranscriptionHistoryEntry] {
         try await withCheckedThrowingContinuation { continuation in
             self.queue.async {
@@ -137,12 +142,16 @@ final class TranscriptionHistoryWriter: @unchecked Sendable {
                     // bundle's defaults and older versions write it again after a downgrade.
                     var imported: Data?
                     if let data = self.defaults.data(forKey: self.legacyKey) {
-                        if let legacy = try? JSONDecoder().decode([TranscriptionHistoryEntry].self, from: data) {
+                        do {
+                            let legacy = try JSONDecoder().decode([TranscriptionHistoryEntry].self, from: data)
                             try database.importLegacy(legacy.map { try self.record($0) })
                             imported = data
-                        } else {
+                        } catch let error as DecodingError {
                             // Keep the bytes for recovery, but never let them block saved history.
-                            DebugLogger.shared.warning("Skipped unreadable legacy history; it was left in place", source: "TranscriptionHistoryStore")
+                            DebugLogger.shared.warning(
+                                "Skipped unreadable legacy history (\(data.count) bytes); it was left in place: \(error)",
+                                source: "TranscriptionHistoryStore"
+                            )
                         }
                     }
                     let entries = try database.read().map {
