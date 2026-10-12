@@ -135,15 +135,26 @@ final class TranscriptionHistoryWriter: @unchecked Sendable {
                     self.database = database
                     // The database is shared by every build, while legacy history lives in each
                     // bundle's defaults and older versions write it again after a downgrade.
+                    var imported: Data?
                     if let data = self.defaults.data(forKey: self.legacyKey) {
-                        let legacy = try JSONDecoder().decode([TranscriptionHistoryEntry].self, from: data)
-                        try database.importLegacy(legacy.map { try self.record($0) })
+                        if let legacy = try? JSONDecoder().decode([TranscriptionHistoryEntry].self, from: data) {
+                            try database.importLegacy(legacy.map { try self.record($0) })
+                            imported = data
+                        } else {
+                            // Keep the bytes for recovery, but never let them block saved history.
+                            DebugLogger.shared.warning("Skipped unreadable legacy history; it was left in place", source: "TranscriptionHistoryStore")
+                        }
                     }
                     let entries = try database.read().map {
                         try JSONDecoder().decode(TranscriptionHistoryEntry.self, from: $0.payload)
                     }.sorted { $0.timestamp > $1.timestamp }
                     // The transaction is committed and every payload decoded before retiring legacy storage.
-                    self.defaults.removeObject(forKey: self.legacyKey)
+                    // An older app instance may rewrite the key meanwhile, so only retire the bytes that were
+                    // imported and leave newer ones for the next load. This narrows the window; it is not
+                    // atomic across processes.
+                    if let imported, self.defaults.data(forKey: self.legacyKey) == imported {
+                        self.defaults.removeObject(forKey: self.legacyKey)
+                    }
                     DebugLogger.shared.debug("HISTORY_BENCH loaded entries=\(entries.count) storage=sqlite", source: "TranscriptionHistoryStore")
                     continuation.resume(returning: entries)
                 } catch {
